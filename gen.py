@@ -54,19 +54,28 @@ class Visit(ast.NodeVisitor):
         if self.at_global_scope():
             yield 'const '
         if len(node.targets) == 1:
-            yield from self.visit(node.targets[0])
+            thing = node.targets[0]
+            if isinstance(thing, ast.Tuple):
+                yield 'let '
+                yield from self.call_list(thing.elts)
+            else:
+                yield from self.visit(thing)
         else:
-            yield '('
-            for item in node.targets:
-                yield from self.visit(item)
-                yield ','
-            yield ')'
+            yield from self.call_list(node.targets)
 
         if self.at_global_scope():
             yield ': Unknown'
         yield ' = '
         yield from self.visit(node.value)
         yield ';\n'
+
+    def call_list(self, some):
+        yield '('
+        for (i, item) in enumerate(some):
+            yield from self.visit(item)
+            if i != len(some) - 1:
+                yield ', '
+        yield ')'
 
     def visit_Store(self, node: ast.Store):
         yield '/* store */'
@@ -86,16 +95,16 @@ class Visit(ast.NodeVisitor):
         yield ')'
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp):
-        yield 'unimplemented!(' + rust_str(ast.dump(node)) + ')'
+        yield 'panic!(' + rust_str(ast.dump(node)) + ')'
 
     def visit_ListComp(self, node: ast.GeneratorExp):
-        yield 'unimplemented!(' + rust_str(ast.dump(node)) + ')'
+        yield 'panic!(' + rust_str(ast.dump(node)) + ')'
 
     def visit_SetComp(self, node: ast.GeneratorExp):
-        yield 'unimplemented!(' + rust_str(ast.dump(node)) + ')'
+        yield 'panic!(' + rust_str(ast.dump(node)) + ')'
 
     def visit_DictComp(self, node: ast.GeneratorExp):
-        yield 'unimplemented!(' + rust_str(ast.dump(node)) + ')'
+        yield 'panic!(' + rust_str(ast.dump(node)) + ')'
 
     def visit_ClassDef(self, node: ast.ClassDef):
         yield 'impl ' + node.name + '{\n'
@@ -250,7 +259,7 @@ class Visit(ast.NodeVisitor):
         for item in node.body:
             yield from self.visit(item)
         yield '} {\n'
-        yield 'unimplemented!("multilple handlers:");\n'
+        yield 'panic!("multilple handlers:");\n'
         for handler in node.handlers:
             yield from self.visit(handler)
         yield '}\n\n'
@@ -277,6 +286,12 @@ class Visit(ast.NodeVisitor):
         yield from self.recurse(node)
 
     def visit_If(self, node: ast.If):
+        if self.at_global_scope()\
+                and isinstance(node.test, ast.Compare)\
+                and isinstance(node.test.left, ast.Name)\
+                and node.test.left.id == '__name__':
+            yield '/* TODO: skipped if __name__ hack */'
+            return
         yield 'if '
         yield from self.visit(node.test)
         yield '{ \n'
@@ -422,7 +437,7 @@ class Visit(ast.NodeVisitor):
             yield from self.visit(node.upper)
 
     def visit_Delete(self, node: ast.Delete):
-        yield 'unimplemented!(' + rust_str(ast.dump(node)) + ');\n'
+        yield 'panic!(' + rust_str(ast.dump(node)) + ');\n'
 
 
 def strip_alias(thing) -> str:
