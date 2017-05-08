@@ -11,6 +11,18 @@ class Visit(ast.NodeVisitor):
     def at_global_scope(self):
         return not self.scope
 
+    def whitespace(self):
+        return '\n' + ('   ' * len(self.scope))
+
+    def safe_let(self, thing):
+        if isinstance(thing, ast.Name) and not self.at_global_scope()\
+                and ['class'] != self.scope\
+                and 'for' not in self.scope and 'while' not in self.scope:
+            yield 'let '
+
+        if thing:
+            yield from self.visit(thing)
+
     def generic_visit(self, node: ast.AST):
         raise Exception(node)
 
@@ -29,29 +41,30 @@ class Visit(ast.NodeVisitor):
                 isinstance(possible_docstring.value, ast.Str):
             fiddled.pop(0)
             docstring = inspect.cleandoc(possible_docstring.value.s)
-            yield '\n'.join('// {}'.format(x) for x in docstring.split('\n')) + '\n'
+            yield self.whitespace().join('// {}'.format(x) for x in docstring.split('\n')) + self.whitespace()
 
         for item in fiddled:
             yield from self.visit(item)
 
     def visit_Expr(self, node: ast.Expr):
-        yield '/* expr */'
+        # yield '/* expr */'
         yield from self.recurse(node)
-        yield ';\n'
+        yield ';' + self.whitespace()
 
     def visit_Str(self, node: ast.Str):
         yield rust_str(node.s)
 
     def visit_Import(self, node: ast.Import):
         for name in node.names:
-            yield 'use {};\n'.format(strip_alias(name))
+            yield 'use {};{}'.format(strip_alias(name), self.whitespace())
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
         for mod in node.names:
-            yield 'use {}::{};\n'.format(node.module.replace('.', '::'), strip_alias(mod.name))
+            yield 'use {}::{};{}'.format(node.module.replace('.', '::'), strip_alias(mod.name), self.whitespace())
 
     def visit_Assign(self, node: ast.Assign):
-        if self.at_global_scope():
+        gen_const = self.at_global_scope() or self.scope == ['class']
+        if gen_const:
             yield 'const '
         if len(node.targets) == 1:
             thing = node.targets[0]
@@ -59,15 +72,16 @@ class Visit(ast.NodeVisitor):
                 yield 'let '
                 yield from self.call_list(thing.elts)
             else:
-                yield from self.visit(thing)
+                yield from self.safe_let(thing)
         else:
+            yield from self.safe_let(None)
             yield from self.call_list(node.targets)
 
-        if self.at_global_scope():
+        if gen_const:
             yield ': Unknown'
         yield ' = '
         yield from self.visit(node.value)
-        yield ';\n'
+        yield ';' + self.whitespace()
 
     def call_list(self, some):
         yield '('
@@ -85,7 +99,7 @@ class Visit(ast.NodeVisitor):
         yield node.id
 
     def visit_Call(self, node: ast.Call):
-        yield '/* call */'
+        # yield '/* call */'
         yield from self.visit(node.func)
         yield '('
         for (i, arg) in enumerate(node.args):
@@ -107,9 +121,11 @@ class Visit(ast.NodeVisitor):
         yield 'panic!(' + rust_str(ast.dump(node)) + ')'
 
     def visit_ClassDef(self, node: ast.ClassDef):
-        yield 'impl ' + node.name + '{\n'
+        self.scope.append('class')
+        yield 'impl ' + node.name + '{' + self.whitespace()
         yield from self.doc_body(node)
-        yield '}\n'
+        self.scope.pop()
+        yield '}' + self.whitespace()
 
     def visit_Tuple(self, node: ast.Tuple):
         yield '('
@@ -202,11 +218,11 @@ class Visit(ast.NodeVisitor):
         if node.returns:
             yield ' -> '
             yield from self.visit(node.returns)
-        yield '{\n'
         self.scope.append('method')
+        yield '{' + self.whitespace()
         yield from self.doc_body(node)
         self.scope.pop()
-        yield '}'
+        yield '}\n' + self.whitespace()
 
     def render_arguments(self, node: ast.arguments, types: bool):
         assert not node.vararg
@@ -248,23 +264,25 @@ class Visit(ast.NodeVisitor):
             yield 'HashMap::new()'
             return
 
-        yield 'hashmap!(\n'
+        yield 'hashmap!(' + self.whitespace()
         for i in range(len(node.keys)):
             yield from self.visit(node.keys[i])
             yield ' => '
             yield from self.visit(node.values[i])
-            yield ',\n'
+            yield ',' + self.whitespace()
         yield ')'
 
     def visit_Try(self, node: ast.Try):
-        yield 'if /* try */ !{\n'
+        self.scope.append('try')
+        yield 'if /* try */ !{' + self.whitespace()
         for item in node.body:
             yield from self.visit(item)
-        yield '} {\n'
-        yield 'panic!("multilple handlers:");\n'
+        yield '} {' + self.whitespace()
+        yield 'panic!("multilple handlers:");' + self.whitespace()
         for handler in node.handlers:
             yield from self.visit(handler)
-        yield '}\n\n'
+        self.scope.pop()
+        yield '}\n' + self.whitespace()
 
         assert not node.orelse
 
@@ -296,7 +314,8 @@ class Visit(ast.NodeVisitor):
             return
         yield 'if '
         yield from self.visit(node.test)
-        yield '{ \n'
+        self.scope.append('if')
+        yield ' {' + self.whitespace()
         for item in node.body:
             yield from self.visit(item)
         if node.orelse:
@@ -304,38 +323,41 @@ class Visit(ast.NodeVisitor):
             for item in node.orelse:
                 yield from self.visit(item)
 
-        yield '}\n\n'
+        self.scope.pop()
+        yield '}\n' + self.whitespace()
 
     def visit_IfExp(self, node: ast.IfExp):
         yield 'if '
         yield from self.visit(node.test)
-        yield '{'
+        yield ' {' + self.whitespace()
         yield from self.visit(node.body)
         yield '} else {'
         yield from self.visit(node.orelse)
         yield '}'
 
     def visit_Return(self, node: ast.Return):
-        yield 'return'
+        yield 'return '
         if node.value:
             yield from self.visit(node.value)
-        yield ';\n'
+        yield ';' + self.whitespace()
 
     def visit_Continue(self, node: ast.Continue):
-        yield 'continue;\n'
+        yield 'continue;' + self.whitespace()
 
     def visit_Break(self, node: ast.Break):
-        yield 'break;\n'
+        yield 'break;' + self.whitespace()
 
     def visit_For(self, node: ast.For):
         yield 'for '
         yield from self.visit(node.target)
         yield ' in '
         yield from self.visit(node.iter)
-        yield ' {\n'
+        self.scope.append('for')
+        yield ' {' + self.whitespace()
         for item in node.body:
             yield from self.visit(item)
-        yield '}\n'
+        self.scope.pop()
+        yield '}' + self.whitespace()
 
     def visit_Compare(self, node: ast.Compare):
         assert 1 == len(node.ops)
@@ -378,27 +400,27 @@ class Visit(ast.NodeVisitor):
     def visit_Raise(self, node: ast.Raise):
         yield '/* raise */ return Err('
         yield from self.visit(node.exc)
-        yield ')'
+        yield ');' + self.whitespace()
 
     def visit_Assert(self, node: ast.Assert):
         yield 'assert!('
         yield from self.visit(node.test)
-        yield ');\n'
+        yield ');' + self.whitespace()
 
     def visit_Num(self, node: ast.Num):
         yield repr(node.n)
 
     def visit_With(self, node: ast.With):
-        yield '{/* <with block> */\n'
+        yield '{/* <with block> */' + self.whitespace()
         for item in node.items:
-            yield from self.visit(item)
-            yield ';'
-        yield '\n/* <-> */\n'
+            yield from self.safe_let(item)
+            yield ';' + self.whitespace()
+        yield self.whitespace() + '/* <-> */' + self.whitespace()
 
         for item in node.body:
             yield from self.visit(item)
 
-        yield '}/* </with block> */\n\n'
+        yield '}/* </with block> */\n' + self.whitespace()
 
     def visit_withitem(self, node: ast.withitem):
         yield from self.visit(node.optional_vars)
@@ -415,18 +437,21 @@ class Visit(ast.NodeVisitor):
 
     def visit_AugAssign(self, node: ast.AugAssign):
         yield from self.visit(node.target)
+        yield ' '
         yield from self.visit(node.op)
-        yield '='
+        yield '= '
         yield from self.visit(node.value)
-        yield ';'
+        yield ';' + self.whitespace()
 
     def visit_While(self, node: ast.While):
         yield 'while '
         yield from self.visit(node.test)
-        yield '{\n'
+        self.scope.append('while')
+        yield '{' + self.whitespace()
         for item in node.body:
             yield from self.visit(item)
-        yield '}\n'
+        self.scope.pop()
+        yield '}' + self.whitespace()
 
         assert not node.orelse
 
@@ -439,7 +464,7 @@ class Visit(ast.NodeVisitor):
             yield from self.visit(node.upper)
 
     def visit_Delete(self, node: ast.Delete):
-        yield 'panic!(' + rust_str(ast.dump(node)) + ');\n'
+        yield 'panic!(' + rust_str(ast.dump(node)) + ');' + self.whitespace()
 
 
 def strip_alias(thing) -> str:
