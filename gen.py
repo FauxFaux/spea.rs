@@ -122,12 +122,14 @@ class Visit(ast.NodeVisitor):
     def visit_BinOp(self, node: ast.BinOp):
         if isinstance(node.op, ast.Mod):
             yield 'format!('
-            yield from self.visit(node.left)
+            assert isinstance(node.left, ast.Str)
+            yield rust_str(node.left.s.replace('%s', '{}').replace('%d', '{}'))
             if isinstance(node.right, ast.Tuple):
                 for item in node.right.elts:
                     yield ', '
                     yield from self.visit(item)
             else:
+                yield ', '
                 yield from self.visit(node.right)
 
             yield ')'
