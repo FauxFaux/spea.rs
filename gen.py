@@ -278,7 +278,8 @@ class Visit(ast.NodeVisitor):
         for item in node.body:
             yield from self.visit(item)
         yield '} {' + self.whitespace()
-        yield 'panic!("multilple handlers:");' + self.whitespace()
+        if len(node.handlers) > 1:
+            yield 'panic!("multilple handlers:");' + self.whitespace()
         for handler in node.handlers:
             yield from self.visit(handler)
         self.scope.pop()
@@ -411,6 +412,7 @@ class Visit(ast.NodeVisitor):
         yield repr(node.n)
 
     def visit_With(self, node: ast.With):
+        self.scope.append('with')
         yield '{/* <with block> */' + self.whitespace()
         for item in node.items:
             yield from self.safe_let(item)
@@ -420,6 +422,7 @@ class Visit(ast.NodeVisitor):
         for item in node.body:
             yield from self.visit(item)
 
+        self.scope.pop()
         yield '}/* </with block> */\n' + self.whitespace()
 
     def visit_withitem(self, node: ast.withitem):
