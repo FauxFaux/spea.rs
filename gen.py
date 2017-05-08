@@ -1,9 +1,16 @@
 import ast
-import os
+import inspect
 import sys
+from typing import List
 
 
 class Visit(ast.NodeVisitor):
+    def __init__(self):
+        self.scope = []  # type: List[str]
+
+    def at_global_scope(self):
+        return not self.scope
+
     def generic_visit(self, node: ast.AST):
         raise Exception(node)
 
@@ -13,24 +20,39 @@ class Visit(ast.NodeVisitor):
 
     def visit_Module(self, node: ast.Module):
         yield '/* module */'
-        yield from self.recurse(node)
+        yield from self.doc_body(node)
+
+    def doc_body(self, node):
+        fiddled = list(node.body)
+        possible_docstring = fiddled[0]
+        if isinstance(possible_docstring, ast.Expr) and \
+                isinstance(possible_docstring.value, ast.Str):
+            fiddled.pop(0)
+            docstring = inspect.cleandoc(possible_docstring.value.s)
+            yield '\n'.join('/// {}'.format(x) for x in docstring.split('\n')) + '\n'
+
+        for item in fiddled:
+            yield from self.visit(item)
 
     def visit_Expr(self, node: ast.Expr):
         yield '/* expr */'
         yield from self.recurse(node)
+        yield ';\n'
 
     def visit_Str(self, node: ast.Str):
         yield rust_str(node.s)
 
     def visit_Import(self, node: ast.Import):
         for name in node.names:
-            yield 'use {};'.format(strip_alias(name))
+            yield 'use {};\n'.format(strip_alias(name))
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
         for mod in node.names:
-            yield 'use {}::{};'.format(node.module, strip_alias(mod.name))
+            yield 'use {}::{};\n'.format(node.module.replace('.', '::'), strip_alias(mod.name))
 
     def visit_Assign(self, node: ast.Assign):
+        if self.at_global_scope():
+            yield 'const'
         if len(node.targets) == 1:
             yield from self.visit(node.targets[0])
         else:
@@ -40,6 +62,8 @@ class Visit(ast.NodeVisitor):
                 yield ','
             yield ')'
 
+        if self.at_global_scope():
+            yield ': Unknown'
         yield ' = '
         yield from self.visit(node.value)
         yield ';\n'
@@ -74,7 +98,7 @@ class Visit(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef):
         yield 'impl ' + node.name + '{\n'
-        yield from self.recurse(node)
+        yield from self.doc_body(node)
         yield '}\n'
 
     def visit_Tuple(self, node: ast.Tuple):
@@ -147,13 +171,15 @@ class Visit(ast.NodeVisitor):
     def visit_FunctionDef(self, node: ast.FunctionDef):
         yield 'fn'
         yield node.name
+        assert isinstance(node.args, ast.arguments)
         yield from self.visit(node.args)
         if node.returns:
             yield ' -> '
             yield from self.visit(node.returns)
         yield '{\n'
-        for bod in node.body:
-            yield from self.visit(bod)
+        self.scope.append('method')
+        yield from self.doc_body(node)
+        self.scope.pop()
         yield '}'
 
     def visit_arguments(self, node: ast.arguments):
@@ -166,6 +192,7 @@ class Visit(ast.NodeVisitor):
 
         yield '('
         for arg in node.args:
+            assert isinstance(arg, ast.arg)
             yield from self.visit(arg)
             yield ','
         yield ')'
