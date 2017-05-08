@@ -29,7 +29,7 @@ class Visit(ast.NodeVisitor):
                 isinstance(possible_docstring.value, ast.Str):
             fiddled.pop(0)
             docstring = inspect.cleandoc(possible_docstring.value.s)
-            yield '\n'.join('/// {}'.format(x) for x in docstring.split('\n')) + '\n'
+            yield '\n'.join('// {}'.format(x) for x in docstring.split('\n')) + '\n'
 
         for item in fiddled:
             yield from self.visit(item)
@@ -52,7 +52,7 @@ class Visit(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign):
         if self.at_global_scope():
-            yield 'const'
+            yield 'const '
         if len(node.targets) == 1:
             yield from self.visit(node.targets[0])
         else:
@@ -79,9 +79,10 @@ class Visit(ast.NodeVisitor):
         yield '/* call */'
         yield from self.visit(node.func)
         yield '('
-        for arg in node.args:
+        for (i, arg) in enumerate(node.args):
             yield from self.visit(arg)
-            yield ','
+            if len(node.args) - 1 != i:
+                yield ','
         yield ')'
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp):
@@ -102,17 +103,24 @@ class Visit(ast.NodeVisitor):
         yield '}\n'
 
     def visit_Tuple(self, node: ast.Tuple):
-        yield '&['
-        for element in node.elts:
+        yield '('
+        for (i, element) in enumerate(node.elts):
             yield from self.visit(element)
-            yield ','
-        yield ']'
+            if i != len(node.elts) - 1:
+                yield ', '
+        yield ')'
 
     def visit_BinOp(self, node: ast.BinOp):
         if isinstance(node.op, ast.Mod):
             yield 'format!('
             yield from self.visit(node.left)
-            yield from self.visit(node.right)
+            if isinstance(node.right, ast.Tuple):
+                for item in node.right.elts:
+                    yield ', '
+                    yield from self.visit(item)
+            else:
+                yield from self.visit(node.right)
+
             yield ')'
             return
 
@@ -169,10 +177,17 @@ class Visit(ast.NodeVisitor):
         yield '>='
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        yield 'fn'
-        yield node.name
         assert isinstance(node.args, ast.arguments)
-        yield from self.visit(node.args)
+        args = node.args
+
+        yield 'fn {}<{}> ('.format(
+            node.name,
+            ', '.join(['T{}'.format(i) for i in range(len(node.args.args))])
+        )
+
+        yield from self.render_arguments(node.args, True)
+        yield ')'
+
         if node.returns:
             yield ' -> '
             yield from self.visit(node.returns)
@@ -182,7 +197,7 @@ class Visit(ast.NodeVisitor):
         self.scope.pop()
         yield '}'
 
-    def visit_arguments(self, node: ast.arguments):
+    def render_arguments(self, node: ast.arguments, types: bool):
         assert not node.vararg
         assert not node.kwonlyargs
         # assert not node.defaults
@@ -190,18 +205,17 @@ class Visit(ast.NodeVisitor):
         assert not node.kwarg
         assert not node.kw_defaults
 
-        yield '('
-        for arg in node.args:
+        for (i, arg) in enumerate(node.args):
             assert isinstance(arg, ast.arg)
-            yield from self.visit(arg)
-            yield ','
-        yield ')'
+            if 0 == i and 'self' == arg.arg:
+                yield '&self'
+            else:
+                yield arg.arg
+                if types:
+                    yield ': T{}'.format(i)
 
-    def visit_arg(self, node: ast.arg):
-        if node.arg == 'self':
-            yield '&self'
-        else:
-            yield node.arg
+            if i != len(node.args) - 1:
+                yield ', '
 
     def visit_Attribute(self, node: ast.Attribute):
         yield from self.visit(node.value)
@@ -232,10 +246,10 @@ class Visit(ast.NodeVisitor):
         yield ')'
 
     def visit_Try(self, node: ast.Try):
-        yield 'if /* try */ {'
+        yield 'if /* try */ !{\n'
         for item in node.body:
             yield from self.visit(item)
-        yield '} else {\n'
+        yield '} {\n'
         yield 'unimplemented!("multilple handlers:");\n'
         for handler in node.handlers:
             yield from self.visit(handler)
@@ -276,7 +290,7 @@ class Visit(ast.NodeVisitor):
         yield '}\n\n'
 
     def visit_IfExp(self, node: ast.IfExp):
-        yield 'if'
+        yield 'if '
         yield from self.visit(node.test)
         yield '{'
         yield from self.visit(node.body)
@@ -297,11 +311,11 @@ class Visit(ast.NodeVisitor):
         yield 'break;\n'
 
     def visit_For(self, node: ast.For):
-        yield 'for'
+        yield 'for '
         yield from self.visit(node.target)
-        yield 'in'
+        yield ' in '
         yield from self.visit(node.iter)
-        yield '{\n'
+        yield ' {\n'
         for item in node.body:
             yield from self.visit(item)
         yield '}\n'
@@ -340,7 +354,7 @@ class Visit(ast.NodeVisitor):
 
     def visit_Lambda(self, node: ast.Lambda):
         yield '|'
-        yield from self.visit(node.args)
+        self.render_arguments(node.args, False)
         yield '| '
         yield from self.visit(node.body)
 
@@ -352,7 +366,7 @@ class Visit(ast.NodeVisitor):
     def visit_Assert(self, node: ast.Assert):
         yield 'assert!('
         yield from self.visit(node.test)
-        yield ')'
+        yield ');\n'
 
     def visit_Num(self, node: ast.Num):
         yield repr(node.n)
@@ -361,6 +375,7 @@ class Visit(ast.NodeVisitor):
         yield '{/* <with block> */\n'
         for item in node.items:
             yield from self.visit(item)
+            yield ';'
         yield '\n/* <-> */\n'
 
         for item in node.body:
@@ -375,9 +390,10 @@ class Visit(ast.NodeVisitor):
 
     def visit_Set(self, node: ast.Set):
         yield 'hashset!('
-        for val in node.elts:
+        for (i, val) in enumerate(node.elts):
             yield from self.visit(val)
-            yield ', '
+            if i != len(node.elts) - 1:
+                yield ', '
         yield ')'
 
     def visit_AugAssign(self, node: ast.AugAssign):
@@ -406,7 +422,7 @@ class Visit(ast.NodeVisitor):
             yield from self.visit(node.upper)
 
     def visit_Delete(self, node: ast.Delete):
-        yield 'unimplemented!(' + rust_str(ast.dump(node)) + ')'
+        yield 'unimplemented!(' + rust_str(ast.dump(node)) + ');\n'
 
 
 def strip_alias(thing) -> str:
@@ -425,7 +441,7 @@ def main():
         a = ast.parse(f.read(), source)
 
     for item in Visit().visit(a):
-        print(item, end=' ')
+        print(item, end='')
 
 
 if __name__ == '__main__':
